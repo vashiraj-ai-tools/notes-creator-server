@@ -9,7 +9,14 @@ def init_firebase() -> None:
     settings = get_settings()
     
     if not firebase_admin._apps:
-        cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_PATH)
+        if settings.FIREBASE_SERVICE_ACCOUNT_JSON:
+            import json
+            service_account_info = json.loads(settings.FIREBASE_SERVICE_ACCOUNT_JSON)
+            cred = credentials.Certificate(service_account_info)
+        else:
+            # Fallback to file path
+            cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_PATH)
+            
         firebase_admin.initialize_app(cred)
     
     _db = firestore.client()

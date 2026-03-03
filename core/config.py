@@ -11,7 +11,17 @@ class Settings(BaseSettings):
 
     # Firebase
     FIREBASE_SERVICE_ACCOUNT_PATH: str = "vashiraj-notes-creator.json"
+    FIREBASE_SERVICE_ACCOUNT_JSON: str = "" # Full JSON string for deployment
     FIREBASE_API_KEY: str = "" # Used for REST API (Sign in with password, etc)
+    
+    # Gemini – default key for free-tier / guest users
+    DEFAULT_GEMINI_API_KEY: str = ""  # Reads from GEMINI_API_KEY env var fallback
+    GEMINI_API_KEY: str = ""  # Legacy env var name
+    
+    # Rate limiting
+    FREE_TIER_LIMIT: int = 5          # max requests for logged-in users without own key
+    GUEST_TIER_LIMIT: int = 2         # max requests for anonymous guests
+    FREE_TIER_WINDOW_HOURS: int = 24  # rolling window in hours
     
     # Security
     ENCRYPTION_KEY: str = "" # Generated with Fernet.generate_key()

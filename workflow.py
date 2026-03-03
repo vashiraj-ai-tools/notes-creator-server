@@ -38,14 +38,17 @@ def route_url(state: AppState) -> AppState:
 def extract_blog(state: AppState) -> AppState:
     try:
         url = state["url"]
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        print(f"Fetching blog content with BeautifulSoup from: {url}")
+        response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
         # Remove unwanted elements
-        for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "svg", "form"]):
             element.decompose()
             
         title = soup.title.string if soup.title else "Blog Post"
@@ -56,8 +59,10 @@ def extract_blog(state: AppState) -> AppState:
             
         # Limit text length just in case
         return {**state, "extracted_text": text[:100000], "title": title}
+    except requests.exceptions.Timeout:
+        return {**state, "error": "Request to the blog URL timed out. The site might be too slow."}
     except Exception as e:
-        return {**state, "error": f"Failed to extract blog: {str(e)}"}
+        return {**state, "error": f"Failed to extract blog content: {str(e)}"}
 
 def extract_youtube(state: AppState) -> AppState:
     url = state["url"]
@@ -116,6 +121,7 @@ def extract_youtube(state: AppState) -> AppState:
             return {**state, "error": f"Failed to extract audio or transcripts: {str(audio_e)}"}
 
 def generate_notes(state: AppState) -> AppState:
+    print("--- Actual note creation started ---")
     if state.get("error"):
         return state
         
@@ -123,7 +129,7 @@ def generate_notes(state: AppState) -> AppState:
         return {**state, "error": "GEMINI_API_KEY is missing in .env.local"}
         
     try:
-        model = genai.GenerativeModel('gemini-3-flash-preview')
+        model = genai.GenerativeModel('gemini-3-pro-preview')
         
         prompt = f"""
         You are an expert educational assistant. Your task is to create clear, highly-structured, and easy-to-read revision notes based ONLY on the provided content.

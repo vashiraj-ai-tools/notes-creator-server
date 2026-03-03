@@ -51,12 +51,18 @@ def route_url(state: AppState) -> AppState:
 def extract_blog(state: AppState) -> AppState:
     try:
         url = state["url"]
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=15)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        print(f"Fetching blog content with BeautifulSoup from: {url}")
+        response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
-        for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        
+        # Remove unwanted elements
+        for element in soup(["script", "style", "nav", "footer", "header", "aside", "svg", "form"]):
             element.decompose()
 
         title = soup.title.string if soup.title else "Blog Post"
@@ -65,13 +71,10 @@ def extract_blog(state: AppState) -> AppState:
         if not text or len(text) < 100:
             return {**state, "error": "Not enough readable content found on this page."}
 
+        # Limit text length just in case
         return {**state, "extracted_text": text[:100_000], "title": title}
-    except requests.exceptions.ConnectionError:
-        return {**state, "error": "Could not reach the URL. Check the address and your internet connection."}
     except requests.exceptions.Timeout:
-        return {**state, "error": "Request to the blog URL timed out."}
-    except requests.exceptions.HTTPError as e:
-        return {**state, "error": f"Blog returned an error: {e.response.status_code} {e.response.reason}"}
+        return {**state, "error": "Request to the blog URL timed out. The site might be too slow."}
     except Exception as e:
         return {**state, "error": f"Failed to extract blog content: {str(e)}"}
 
@@ -128,6 +131,7 @@ def extract_youtube(state: AppState) -> AppState:
 
 
 def generate_notes(state: AppState) -> AppState:
+    print("--- Actual note creation started ---")
     if state.get("error"):
         return state
 
