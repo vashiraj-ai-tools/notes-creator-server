@@ -114,7 +114,7 @@ def extract_youtube(state: AppState) -> AppState:
 
         output_template = f"temp_{video_id}"
         ydl_opts = {
-            "format": "m4a/bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
             "outtmpl": f"{output_template}.%(ext)s",
             "quiet": True,
             "no_warnings": True,
