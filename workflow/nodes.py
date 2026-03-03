@@ -14,6 +14,7 @@ import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 from dotenv import load_dotenv
+from core.config import get_settings
 
 # ---------------------------------------------------------------------------
 # Bootstrap
