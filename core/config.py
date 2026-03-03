@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     GUEST_TIER_LIMIT: int = 2         # max requests for anonymous guests
     FREE_TIER_WINDOW_HOURS: int = 24  # rolling window in hours
     
+    # YouTube / Extraction
+    YOUTUBE_COOKIES: str = "" # Optional: raw text of Netscape cookies file
+    
     # Security
     ENCRYPTION_KEY: str = "" # Generated with Fernet.generate_key()
     JWT_SECRET: str = "" # Random string for our own tokens

@@ -81,6 +81,7 @@ def extract_blog(state: AppState) -> AppState:
 
 def extract_youtube(state: AppState) -> AppState:
     url = state["url"]
+    settings = get_settings()
     video_id: Optional[str] = None
 
     if "v=" in url:
@@ -93,6 +94,8 @@ def extract_youtube(state: AppState) -> AppState:
 
     # --- Try transcript first (fast path) ---
     try:
+        # Note: YouTubeTranscriptApi can also take cookies, but usually transcript block
+        # is less aggressive than the media download block.
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         text = " ".join([t["text"] for t in transcript])
         return {**state, "extracted_text": text, "title": "YouTube Video Notes"}
@@ -100,13 +103,26 @@ def extract_youtube(state: AppState) -> AppState:
         print(f"Transcript unavailable ({transcript_err}), falling back to audio download…")
 
     # --- Audio fallback ---
+    cookie_file = None
     try:
+        # If user provided cookies as a string, write to a temp file for yt-dlp
+        if settings.YOUTUBE_COOKIES:
+            cookie_file = f"cookies_{video_id}.txt"
+            with open(cookie_file, "w", encoding="utf-8") as f:
+                f.write(settings.YOUTUBE_COOKIES)
+
         output_template = f"temp_{video_id}"
         ydl_opts = {
             "format": "m4a/bestaudio/best",
             "outtmpl": f"{output_template}.%(ext)s",
             "quiet": True,
+            "no_warnings": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
+        
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             ext = info.get("ext", "m4a")
@@ -127,7 +143,13 @@ def extract_youtube(state: AppState) -> AppState:
 
         return {**state, "audio_file_uri": gemini_file.name, "title": title}
     except Exception as audio_err:
-        return {**state, "error": f"Could not extract audio or transcripts: {str(audio_err)}"}
+        error_msg = str(audio_err)
+        if "Sign in to confirm you’re not a bot" in error_msg:
+            error_msg = "YouTube blocked the server's IP address. Please provide custom cookies in the backend settings to bypass this."
+        return {**state, "error": f"Could not extract audio or transcripts: {error_msg}"}
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            os.remove(cookie_file)
 
 
 def generate_notes(state: AppState) -> AppState:
