@@ -33,6 +33,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "version": "2.0.0"}
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     return JSONResponse(
