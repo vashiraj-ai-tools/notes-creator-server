@@ -6,11 +6,12 @@ def get_job_collection(user_id: str):
     db = get_firestore()
     return db.collection("users").document(user_id).collection("jobs")
 
-def create_job(user_id: str, url: str) -> Job:
+def create_job(user_id: str, url: Optional[str] = None) -> Job:
     job = Job(user_id=user_id, url=url)
     ref = get_job_collection(user_id).document(job.job_id)
     ref.set(job.model_dump(mode="json"))
     return job
+
 
 def get_job(user_id: str, job_id: str) -> Optional[Job]:
     ref = get_job_collection(user_id).document(job_id)

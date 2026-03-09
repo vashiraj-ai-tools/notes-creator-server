@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     
     # YouTube / Extraction
     YOUTUBE_COOKIES: str = "" # Optional: raw text of Netscape cookies file
+    YOUTUBE_PROXY: str = "" # Optional: HTTP/HTTPS proxy URL (e.g. http://user:pass@ip:port)
+
     
     # Security
     ENCRYPTION_KEY: str = "" # Generated with Fernet.generate_key()

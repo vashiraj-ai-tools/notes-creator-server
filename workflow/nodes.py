@@ -4,6 +4,7 @@ LangGraph node functions.
 Each function takes an AppState dict and returns a (partial) AppState dict.
 They are intentionally pure/sync — the graph runner calls them in a thread.
 """
+import io
 import os
 import time
 from typing import TypedDict, Optional
@@ -29,7 +30,7 @@ load_dotenv(dotenv_path="./.env.local")
 # ---------------------------------------------------------------------------
 class AppState(TypedDict):
     url: str
-    content_type: Optional[str]
+    content_type: Optional[str]  # "youtube" | "blog" | "upload"
     title: Optional[str]
     extracted_text: Optional[str]
     audio_file_uri: Optional[str]
@@ -37,13 +38,19 @@ class AppState(TypedDict):
     notes: Optional[str]
     source_type: Optional[str]
     gemini_api_key: str
+    # Upload-specific fields
+    upload_content_type: Optional[str]  # "video" | "text" | "document"
+    file_bytes: Optional[bytes]
+    filename: Optional[str]
 
 
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
 def route_url(state: AppState) -> AppState:
-    url = state["url"]
+    url = state.get("url", "")
+    if state.get("upload_content_type"):
+        return {**state, "content_type": "upload", "source_type": "upload"}
     if "youtube.com" in url or "youtu.be" in url:
         return {**state, "content_type": "youtube", "source_type": "youtube"}
     return {**state, "content_type": "blog", "source_type": "article"}
@@ -118,11 +125,15 @@ def extract_youtube(state: AppState) -> AppState:
             "outtmpl": f"{output_template}.%(ext)s",
             "quiet": True,
             "no_warnings": True,
+            "nocheckcertificate": True,
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
         
         if cookie_file:
             ydl_opts["cookiefile"] = cookie_file
+        
+        if settings.YOUTUBE_PROXY:
+            ydl_opts["proxy"] = settings.YOUTUBE_PROXY
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -146,14 +157,98 @@ def extract_youtube(state: AppState) -> AppState:
     except Exception as audio_err:
         error_msg = str(audio_err)
         if "Sign in to confirm you’re not a bot" in error_msg:
-            error_msg = "YouTube blocked the server's IP address. Please provide custom cookies in the backend settings to bypass this."
+            error_msg = ("YouTube blocked the server's IP. Please provide Netscape-formatted cookies "
+                         "in the 'YOUTUBE_COOKIES' environment variable to bypass this.")
         return {**state, "error": f"Could not extract audio or transcripts: {error_msg}"}
     finally:
         if cookie_file and os.path.exists(cookie_file):
             os.remove(cookie_file)
 
 
+def extract_upload(state: AppState) -> AppState:
+    """Handle uploaded content: raw text, video file, or PDF/DOCX document."""
+    upload_type = state.get("upload_content_type", "text")
+    file_bytes: Optional[bytes] = state.get("file_bytes")
+    filename: Optional[str] = state.get("filename") or "upload"
+
+    try:
+        if upload_type == "text":
+            text = state.get("extracted_text", "")
+            if not text or len(text) < 50:
+                return {**state, "error": "Pasted text is too short to generate notes."}
+            return {**state, "title": "Pasted Document", "source_type": "document",
+                    "extracted_text": text[:200_000]}
+
+        elif upload_type == "video":
+            if not file_bytes:
+                return {**state, "error": "No video file received."}
+            # Write to a temp file then upload to Gemini File API
+            _, ext = os.path.splitext(filename)
+            if not ext:
+                ext = ".mp4"  # Default to mp4 if no extension is provided
+            tmp_path = f"upload_video_{os.getpid()}{ext}"
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(file_bytes)
+                print(f"Uploading video ({len(file_bytes) // 1024} KB) to Gemini…")
+                genai.configure(api_key=state["gemini_api_key"])
+                gemini_file = genai.upload_file(path=tmp_path, display_name=filename)
+                while gemini_file.state.name == "PROCESSING":
+                    print("Waiting for Gemini file processing…")
+                    time.sleep(2)
+                    gemini_file = genai.get_file(gemini_file.name)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            return {**state, "audio_file_uri": gemini_file.name, "title": filename,
+                    "source_type": "video"}
+
+        elif upload_type == "document":
+            if not file_bytes:
+                return {**state, "error": "No document file received."}
+            lower = filename.lower()
+            text = ""
+            if lower.endswith(".pdf"):
+                try:
+                    import pypdf
+                    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+                    text = "\n".join(
+                        page.extract_text() or "" for page in reader.pages
+                    )
+                except ImportError:
+                    # Fallback to PyPDF2
+                    import PyPDF2
+                    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+                    text = "\n".join(
+                        reader.pages[i].extract_text() or ""
+                        for i in range(len(reader.pages))
+                    )
+            elif lower.endswith(".docx"):
+                try:
+                    import docx
+                    doc = docx.Document(io.BytesIO(file_bytes))
+                    text = "\n".join(p.text for p in doc.paragraphs)
+                except ImportError:
+                    return {**state, "error": "python-docx is not installed on the server."}
+            elif lower.endswith(".txt"):
+                text = file_bytes.decode("utf-8", errors="replace")
+            else:
+                return {**state, "error": f"Unsupported document format: {filename}"}
+
+            if not text or len(text.strip()) < 50:
+                return {**state, "error": "Could not extract readable text from the document."}
+            return {**state, "extracted_text": text[:200_000], "title": filename,
+                    "source_type": "document"}
+
+        else:
+            return {**state, "error": f"Unknown upload type: {upload_type}"}
+
+    except Exception as exc:
+        return {**state, "error": f"Failed to process upload: {str(exc)}"}
+
+
 def generate_notes(state: AppState) -> AppState:
+
     print("--- Actual note creation started ---")
     if state.get("error"):
         return state
