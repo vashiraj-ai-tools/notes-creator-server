@@ -4,6 +4,7 @@ LangGraph node functions.
 Each function takes an AppState dict and returns a (partial) AppState dict.
 They are intentionally pure/sync — the graph runner calls them in a thread.
 """
+import glob
 import io
 import os
 import time
@@ -87,6 +88,56 @@ def extract_blog(state: AppState) -> AppState:
         return {**state, "error": f"Failed to extract blog content: {str(e)}"}
 
 
+def _pick_best_audio_format(formats: list) -> str:
+    """Pick the best audio format from available yt-dlp formats.
+    
+    Preference order:
+    1. Audio-only streams, preferring m4a > webm > mp3 > others, sorted by bitrate
+    2. Any format that has audio (video+audio combined), sorted by audio bitrate
+    3. Fallback to 'bestaudio/best' and let yt-dlp figure it out
+    """
+    # Separate audio-only formats from combined formats
+    audio_only = []
+    has_audio = []
+    
+    preferred_exts = {"m4a": 0, "webm": 1, "mp3": 2, "ogg": 3, "opus": 4}
+    
+    for fmt in formats:
+        fmt_id = fmt.get("format_id", "")
+        ext = fmt.get("ext", "")
+        abr = fmt.get("abr") or fmt.get("tbr") or 0  # audio bitrate or total bitrate
+        vcodec = fmt.get("vcodec", "none")
+        acodec = fmt.get("acodec", "none")
+        
+        # Skip formats with no audio
+        if acodec == "none" or acodec is None:
+            continue
+        
+        # Audio-only: no video codec
+        if vcodec == "none" or vcodec is None:
+            ext_priority = preferred_exts.get(ext, 99)
+            audio_only.append((ext_priority, -abr, fmt_id, ext))
+        else:
+            has_audio.append((-abr, fmt_id, ext))
+    
+    if audio_only:
+        audio_only.sort()  # sort by ext priority, then by -abr (highest first)
+        chosen_id = audio_only[0][2]
+        chosen_ext = audio_only[0][3]
+        print(f"[YouTube] Found {len(audio_only)} audio-only formats; picking '{chosen_id}' ({chosen_ext})")
+        return chosen_id
+    
+    if has_audio:
+        has_audio.sort()  # sort by -abr (highest bitrate first)
+        chosen_id = has_audio[0][1]
+        chosen_ext = has_audio[0][2]
+        print(f"[YouTube] No audio-only formats; picking combined '{chosen_id}' ({chosen_ext})")
+        return chosen_id
+    
+    print("[YouTube] WARNING: Could not identify any audio format, falling back to 'bestaudio/best'")
+    return "bestaudio/best"
+
+
 def extract_youtube(state: AppState) -> AppState:
     url = state["url"]
     settings = get_settings()
@@ -114,15 +165,33 @@ def extract_youtube(state: AppState) -> AppState:
     cookie_file = None
     try:
         # If user provided cookies as a string, write to a temp file for yt-dlp
+        cookies_provided = False
         if settings.YOUTUBE_COOKIES:
+            cookie_str = settings.YOUTUBE_COOKIES
+            # Environment variables often store literal \n instead of real newlines
+            if "\\n" in cookie_str and "\n" not in cookie_str:
+                cookie_str = cookie_str.replace("\\n", "\n")
+            
             cookie_file = f"cookies_{video_id}.txt"
             with open(cookie_file, "w", encoding="utf-8") as f:
-                f.write(settings.YOUTUBE_COOKIES)
+                f.write(cookie_str)
+            
+            # Validate basic structure
+            lines = [l.strip() for l in cookie_str.strip().splitlines() if l.strip() and not l.startswith("#")]
+            cookies_provided = True
+            print(f"[YouTube] Cookies file written with {len(lines)} cookie entries")
+            if lines:
+                # Each Netscape cookie line should have 7 tab-separated fields
+                sample = lines[0]
+                fields = sample.split("\t")
+                if len(fields) != 7:
+                    print(f"[YouTube] WARNING: Cookie format looks wrong — expected 7 tab-separated fields, got {len(fields)}")
+                    print(f"[YouTube] Sample line: {sample[:100]}...")
+        else:
+            print("[YouTube] No YOUTUBE_COOKIES environment variable set")
 
         output_template = f"temp_{video_id}"
-        ydl_opts = {
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "outtmpl": f"{output_template}.%(ext)s",
+        base_ydl_opts = {
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
@@ -130,20 +199,64 @@ def extract_youtube(state: AppState) -> AppState:
         }
         
         if cookie_file:
-            ydl_opts["cookiefile"] = cookie_file
+            base_ydl_opts["cookiefile"] = cookie_file
         
         if settings.YOUTUBE_PROXY:
-            ydl_opts["proxy"] = settings.YOUTUBE_PROXY
+            base_ydl_opts["proxy"] = settings.YOUTUBE_PROXY
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            ext = info.get("ext", "m4a")
-            title = info.get("title", "YouTube Video")
+        # Step 1: Query available formats (no download)
+        info_opts = {**base_ydl_opts, "skip_download": True}
+        with yt_dlp.YoutubeDL(info_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        
+        title = info.get("title", "YouTube Video")
+        formats = info.get("formats", [])
+        
+        # Step 2: Pick the best audio format from available ones
+        chosen_format = _pick_best_audio_format(formats)
+        print(f"[YouTube] Selected format: {chosen_format}")
+
+        # Step 3: Download with the chosen format
+        dl_opts = {
+            **base_ydl_opts,
+            "format": chosen_format,
+            "outtmpl": f"{output_template}.%(ext)s",
+        }
+
+        with yt_dlp.YoutubeDL(dl_opts) as ydl:
+            dl_info = ydl.extract_info(url, download=True)
+            ext = dl_info.get("ext", "m4a")
             filename = f"{output_template}.{ext}"
+        
+        # Fallback: if the expected filename doesn't exist, glob for it
+        if not os.path.exists(filename):
+            candidates = glob.glob(f"{output_template}.*")
+            if candidates:
+                filename = candidates[0]
+                print(f"[YouTube] Actual downloaded file: {filename}")
+            else:
+                raise FileNotFoundError(f"Downloaded file not found for {output_template}")
 
         print(f"Uploading {filename} to Gemini...")
         genai.configure(api_key=state["gemini_api_key"])
-        gemini_file = genai.upload_file(path=filename)
+        
+        # Map file extension to MIME type for Gemini
+        ext_to_mime = {
+            ".m4a": "audio/mp4",
+            ".mp3": "audio/mpeg",
+            ".mp4": "audio/mp4",
+            ".webm": "audio/webm",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/ogg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+        }
+        file_ext = os.path.splitext(filename)[1].lower()
+        mime_type = ext_to_mime.get(file_ext, "audio/mp4")
+        print(f"[YouTube] Using MIME type: {mime_type} for extension: {file_ext}")
+        
+        gemini_file = genai.upload_file(path=filename, mime_type=mime_type)
 
         while gemini_file.state.name == "PROCESSING":
             print("Waiting for Gemini file processing…")
@@ -156,9 +269,15 @@ def extract_youtube(state: AppState) -> AppState:
         return {**state, "audio_file_uri": gemini_file.name, "title": title}
     except Exception as audio_err:
         error_msg = str(audio_err)
-        if "Sign in to confirm you’re not a bot" in error_msg:
-            error_msg = ("YouTube blocked the server's IP. Please provide Netscape-formatted cookies "
-                         "in the 'YOUTUBE_COOKIES' environment variable to bypass this.")
+        if "Sign in to confirm you're not a bot" in error_msg or "bot" in error_msg.lower():
+            if cookies_provided:
+                error_msg = ("YouTube blocked the request even WITH cookies provided. "
+                             "The cookies are likely expired or malformed. Please re-export "
+                             "fresh Netscape-formatted cookies from a browser where you are "
+                             "logged into YouTube and update the 'YOUTUBE_COOKIES' env var.")
+            else:
+                error_msg = ("YouTube blocked the server's IP. Please provide Netscape-formatted cookies "
+                             "in the 'YOUTUBE_COOKIES' environment variable to bypass this.")
         return {**state, "error": f"Could not extract audio or transcripts: {error_msg}"}
     finally:
         if cookie_file and os.path.exists(cookie_file):
