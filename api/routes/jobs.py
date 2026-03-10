@@ -148,7 +148,7 @@ async def submit_guest_job(
 async def submit_upload_job(
     request: Request,
     background_tasks: BackgroundTasks,
-    upload_type: str = Form(..., description="video | text | document"),
+    upload_type: str = Form(..., description="video | audio | text | document"),
     text_content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     user: dict = Depends(get_current_user),
@@ -189,7 +189,7 @@ async def submit_upload_job(
 async def submit_guest_upload_job(
     request: Request,
     background_tasks: BackgroundTasks,
-    upload_type: str = Form(..., description="video | text | document"),
+    upload_type: str = Form(..., description="video | audio | text | document"),
     text_content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
 ) -> CreateJobResponse:
@@ -225,12 +225,12 @@ async def submit_guest_upload_job(
 # ── Shared upload helpers ──────────────────────────────────────────────────────
 
 def _validate_upload_type(upload_type: str, text_content, file):
-    valid_types = {"video", "text", "document"}
+    valid_types = {"video", "audio", "text", "document"}
     if upload_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"upload_type must be one of {valid_types}")
     if upload_type == "text" and not text_content:
         raise HTTPException(status_code=400, detail="text_content is required for upload_type 'text'")
-    if upload_type in {"video", "document"} and file is None:
+    if upload_type in {"video", "audio", "document"} and file is None:
         raise HTTPException(status_code=400, detail=f"A file is required for upload_type '{upload_type}'")
 
 

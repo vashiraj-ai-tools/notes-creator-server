@@ -12,6 +12,7 @@ from workflow.nodes import (
     route_url,
     extract_blog,
     extract_youtube,
+    extract_media_url,
     extract_upload,
     generate_notes,
 )
@@ -25,6 +26,7 @@ _workflow = StateGraph(AppState)
 _workflow.add_node("router", route_url)
 _workflow.add_node("extract_blog", extract_blog)
 _workflow.add_node("extract_youtube", extract_youtube)
+_workflow.add_node("extract_media", extract_media_url)
 _workflow.add_node("extract_upload", extract_upload)
 _workflow.add_node("generate", generate_notes)
 
@@ -37,6 +39,8 @@ def _determine_route(state: AppState) -> str:
         return "extract_upload"
     if ct == "youtube":
         return "extract_youtube"
+    if ct == "media":
+        return "extract_media"
     return "extract_blog"
 
 
@@ -46,11 +50,13 @@ _workflow.add_conditional_edges(
     {
         "extract_youtube": "extract_youtube",
         "extract_blog": "extract_blog",
+        "extract_media": "extract_media",
         "extract_upload": "extract_upload",
     },
 )
 _workflow.add_edge("extract_youtube", "generate")
 _workflow.add_edge("extract_blog", "generate")
+_workflow.add_edge("extract_media", "generate")
 _workflow.add_edge("extract_upload", "generate")
 _workflow.add_edge("generate", END)
 

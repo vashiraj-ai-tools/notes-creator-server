@@ -31,7 +31,7 @@ load_dotenv(dotenv_path="./.env.local")
 # ---------------------------------------------------------------------------
 class AppState(TypedDict):
     url: str
-    content_type: Optional[str]  # "youtube" | "blog" | "upload"
+    content_type: Optional[str]  # "youtube" | "blog" | "media" | "upload"
     title: Optional[str]
     extracted_text: Optional[str]
     audio_file_uri: Optional[str]
@@ -40,9 +40,38 @@ class AppState(TypedDict):
     source_type: Optional[str]
     gemini_api_key: str
     # Upload-specific fields
-    upload_content_type: Optional[str]  # "video" | "text" | "document"
+    upload_content_type: Optional[str]  # "video" | "audio" | "text" | "document"
     file_bytes: Optional[bytes]
     filename: Optional[str]
+
+
+# Media file extensions for direct URL detection
+_MEDIA_EXTENSIONS = {
+    # Audio
+    ".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac", ".aac", ".wma",
+    # Video
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv", ".ts",
+}
+
+# Extension → MIME type mapping (used for Gemini uploads)
+_EXT_TO_MIME = {
+    ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+    ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac",
+    ".aac": "audio/aac", ".wma": "audio/x-ms-wma",
+    ".mp4": "video/mp4", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime", ".webm": "video/webm", ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv", ".ts": "video/mp2t",
+}
+
+_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".opus", ".flac", ".aac", ".wma"}
+
+
+def _get_url_extension(url: str) -> str:
+    """Extract the file extension from a URL, ignoring query parameters."""
+    from urllib.parse import urlparse
+    path = urlparse(url).path
+    _, ext = os.path.splitext(path)
+    return ext.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +83,11 @@ def route_url(state: AppState) -> AppState:
         return {**state, "content_type": "upload", "source_type": "upload"}
     if "youtube.com" in url or "youtu.be" in url:
         return {**state, "content_type": "youtube", "source_type": "youtube"}
+    # Detect direct audio/video file URLs
+    ext = _get_url_extension(url)
+    if ext in _MEDIA_EXTENSIONS:
+        source = "audio" if ext in _AUDIO_EXTENSIONS else "video"
+        return {**state, "content_type": "media", "source_type": source}
     return {**state, "content_type": "blog", "source_type": "article"}
 
 
@@ -284,8 +318,60 @@ def extract_youtube(state: AppState) -> AppState:
             os.remove(cookie_file)
 
 
+def extract_media_url(state: AppState) -> AppState:
+    """Download a direct audio/video URL and upload to Gemini for transcription."""
+    url = state["url"]
+    ext = _get_url_extension(url)
+    mime_type = _EXT_TO_MIME.get(ext, "audio/mpeg")
+    source_type = "audio" if ext in _AUDIO_EXTENSIONS else "video"
+
+    try:
+        print(f"[Media URL] Downloading {source_type} from: {url}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=120, stream=True)
+        response.raise_for_status()
+
+        # Determine filename
+        from urllib.parse import urlparse
+        url_path = urlparse(url).path
+        basename = os.path.basename(url_path) or f"media{ext}"
+        tmp_path = f"media_dl_{os.getpid()}_{basename}"
+
+        # Stream to disk
+        total = 0
+        with open(tmp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                total += len(chunk)
+        print(f"[Media URL] Downloaded {total // 1024} KB")
+
+        # Upload to Gemini
+        genai.configure(api_key=state["gemini_api_key"])
+        print(f"[Media URL] Uploading to Gemini with mime_type={mime_type}")
+        gemini_file = genai.upload_file(path=tmp_path, mime_type=mime_type, display_name=basename)
+
+        while gemini_file.state.name == "PROCESSING":
+            print("[Media URL] Waiting for Gemini file processing…")
+            time.sleep(2)
+            gemini_file = genai.get_file(gemini_file.name)
+
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        return {**state, "audio_file_uri": gemini_file.name, "title": basename,
+                "source_type": source_type}
+
+    except requests.exceptions.Timeout:
+        return {**state, "error": "Download timed out. The media file may be too large or the server too slow."}
+    except Exception as e:
+        return {**state, "error": f"Failed to download media from URL: {str(e)}"}
+
+
 def extract_upload(state: AppState) -> AppState:
-    """Handle uploaded content: raw text, video file, or PDF/DOCX document."""
+    """Handle uploaded content: raw text, video/audio file, or PDF/DOCX document."""
     upload_type = state.get("upload_content_type", "text")
     file_bytes: Optional[bytes] = state.get("file_bytes")
     filename: Optional[str] = state.get("filename") or "upload"
@@ -298,29 +384,30 @@ def extract_upload(state: AppState) -> AppState:
             return {**state, "title": "Pasted Document", "source_type": "document",
                     "extracted_text": text[:200_000]}
 
-        elif upload_type == "video":
+        elif upload_type in ("video", "audio"):
             if not file_bytes:
-                return {**state, "error": "No video file received."}
+                return {**state, "error": f"No {upload_type} file received."}
             # Write to a temp file then upload to Gemini File API
             _, ext = os.path.splitext(filename)
             if not ext:
-                ext = ".mp4"  # Default to mp4 if no extension is provided
-            tmp_path = f"upload_video_{os.getpid()}{ext}"
+                ext = ".mp4" if upload_type == "video" else ".mp3"
+            mime_type = _EXT_TO_MIME.get(ext.lower(), "audio/mpeg" if upload_type == "audio" else "video/mp4")
+            tmp_path = f"upload_{upload_type}_{os.getpid()}{ext}"
             try:
                 with open(tmp_path, "wb") as f:
                     f.write(file_bytes)
-                print(f"Uploading video ({len(file_bytes) // 1024} KB) to Gemini…")
+                print(f"Uploading {upload_type} ({len(file_bytes) // 1024} KB) to Gemini…")
                 genai.configure(api_key=state["gemini_api_key"])
-                gemini_file = genai.upload_file(path=tmp_path, display_name=filename)
+                gemini_file = genai.upload_file(path=tmp_path, display_name=filename, mime_type=mime_type)
                 while gemini_file.state.name == "PROCESSING":
-                    print("Waiting for Gemini file processing…")
+                    print(f"Waiting for Gemini file processing…")
                     time.sleep(2)
                     gemini_file = genai.get_file(gemini_file.name)
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             return {**state, "audio_file_uri": gemini_file.name, "title": filename,
-                    "source_type": "video"}
+                    "source_type": upload_type}
 
         elif upload_type == "document":
             if not file_bytes:
